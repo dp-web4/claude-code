@@ -37,6 +37,13 @@ import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Import Hardbound server client
+try:
+    from hardbound_client import report_outcome as server_report_outcome
+    HARDBOUND_CLIENT_AVAILABLE = True
+except ImportError:
+    HARDBOUND_CLIENT_AVAILABLE = False
+
 # Import agent governance
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
@@ -267,6 +274,23 @@ def main():
 
         except Exception as e:
             record["policy_witnessed"] = {"error": str(e)}
+
+    # Report outcome to Hardbound server (non-blocking, best-effort)
+    if HARDBOUND_CLIENT_AVAILABLE:
+        server_request_id = session.get("_pending_server_request_id")
+        if server_request_id:
+            try:
+                success = tool_error is None
+                server_report_outcome(
+                    request_id=server_request_id,
+                    success=success,
+                    result_hash=record["result"]["output_hash"],
+                )
+                record["hardbound_outcome_reported"] = True
+            except Exception:
+                record["hardbound_outcome_reported"] = False
+            # Clear the pending request ID regardless
+            session.pop("_pending_server_request_id", None)
 
     # Store audit record
     store_audit_record(session, record)

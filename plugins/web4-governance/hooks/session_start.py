@@ -30,6 +30,13 @@ from typing import Optional
 # Import heartbeat tracker
 from heartbeat import get_session_heartbeat
 
+# Import Hardbound server client
+try:
+    from hardbound_client import register_plugin as hardbound_register
+    HARDBOUND_CLIENT_AVAILABLE = True
+except ImportError:
+    HARDBOUND_CLIENT_AVAILABLE = False
+
 # Import agent governance
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
@@ -200,6 +207,14 @@ def initialize_session(session_id):
     host_lct = discover_host_lct()
     host_lct_witness = witness_host_lct(session_id, host_lct) if host_lct else None
 
+    # Register with Hardbound PolicyService (best-effort, non-blocking)
+    hardbound_registration = None
+    if HARDBOUND_CLIENT_AVAILABLE:
+        try:
+            hardbound_registration = hardbound_register(session_id, token)
+        except Exception:
+            pass  # Server unavailable — proceed without it
+
     session = {
         "session_id": session_id,
         "token": token,
@@ -217,6 +232,8 @@ def initialize_session(session_id):
         "policy_entity": policy_entity_dict,
         # Host LCT witness (Web4 fleet identity, Phase 1.5) — None if not bootstrapped
         "host_lct_witness": host_lct_witness,
+        # Hardbound server registration — None if server not available
+        "hardbound_server": hardbound_registration,
     }
 
     session_file = SESSION_DIR / f"{session_id}.json"

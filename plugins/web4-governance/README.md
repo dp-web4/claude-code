@@ -14,7 +14,21 @@ This plugin adds structured governance to Claude Code sessions:
 - **Heartbeat Coherence** - Timing-based session health tracking
 - **Audit Trail** - Verifiable chain of actions with provenance
 
-No external dependencies. No network calls. Just structured, auditable AI actions.
+No external dependencies required. Optional Hardbound server integration for centralized policy evaluation.
+
+## What's New in v1.2
+
+- **Hardbound PolicyService integration** — server-side policy evaluation
+  via `POST /api/v1/policy/evaluate` with automatic fallback to local
+  evaluation when the server is unreachable. Server URL configurable via
+  `HARDBOUND_SERVER_URL` env var, `~/.web4/hardbound.json`, or default
+  `http://localhost:9400`.
+- **Outcome reporting** — `post_tool_use` reports action outcomes to the
+  server via `POST /api/v1/policy/outcome` for closed-loop trust tracking.
+- **Plugin registration** — `session_start` registers with the server via
+  `POST /api/v1/plugin/register`, receiving a `plugin_id` and `lct_id`.
+- **Backward compatible** — all server calls are best-effort. The plugin
+  works identically to before when no server is running.
 
 ## What's New in v1.1
 
@@ -655,6 +669,55 @@ This plugin implements Web4 governance concepts:
 | Agent | Role trust + references | MRH + Witnessing |
 
 For enterprise features (hardware binding, TPM attestation, cross-machine verification), contact dp@metalinxx.io.
+
+## Hardbound Server Integration
+
+The plugin can optionally delegate policy evaluation to a running Hardbound
+PolicyService. This enables centralized, signed policy decisions across
+multiple Claude Code sessions and machines.
+
+### Configuration
+
+The server URL is resolved in order:
+
+1. **Environment variable**: `HARDBOUND_SERVER_URL=http://host:9400`
+2. **Config file**: `~/.web4/hardbound.json`
+   ```json
+   { "server_url": "http://localhost:9400" }
+   ```
+3. **Default**: `http://localhost:9400`
+
+### Server API
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/v1/plugin/register` | POST | Register plugin at session start |
+| `/api/v1/plugin/heartbeat` | POST | Keep-alive |
+| `/api/v1/policy/evaluate` | POST | Get signed policy decision |
+| `/api/v1/policy/outcome` | POST | Report action outcome |
+
+### Evaluation Flow
+
+```
+PreToolUse
+    │
+    ├─ Try server: POST /api/v1/policy/evaluate
+    │   ├─ Success → use server decision (approve/deny)
+    │   └─ Unreachable → fall back to local PolicyEntity
+    │
+    └─ Local evaluation (same as before)
+
+PostToolUse
+    │
+    └─ Report outcome: POST /api/v1/policy/outcome
+        └─ Best-effort, non-blocking
+```
+
+### Without a Server
+
+When no Hardbound server is running, the plugin behaves exactly as before:
+local `PolicyEntity` evaluation with the configured preset. No errors, no
+degradation, no user-visible difference.
 
 ## Contributing
 

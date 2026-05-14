@@ -41,6 +41,13 @@ from pathlib import Path
 # Import heartbeat tracker
 from heartbeat import get_session_heartbeat
 
+# Import Hardbound server client
+try:
+    from hardbound_client import evaluate_policy as server_evaluate_policy
+    HARDBOUND_CLIENT_AVAILABLE = True
+except ImportError:
+    HARDBOUND_CLIENT_AVAILABLE = False
+
 # Import agent governance
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
@@ -73,9 +80,12 @@ def get_rate_limiter():
     return _rate_limiter
 
 
-def evaluate_policy(session, tool_name: str, category: str, target: str, full_command: str = None):
+def evaluate_policy_local(session, tool_name: str, category: str, target: str, full_command: str = None):
     """
-    Evaluate tool call against policy entity.
+    Evaluate tool call against local policy entity.
+
+    This is the original local-only evaluation path, now used as fallback
+    when the Hardbound server is unreachable.
 
     Args:
         session: Session dict with policy_entity_id
@@ -112,13 +122,48 @@ def evaluate_policy(session, tool_name: str, category: str, target: str, full_co
             "reason": evaluation.reason,
             "enforced": evaluation.enforced,
             "constraints": evaluation.constraints,
+            "source": "local",
         }
 
         return evaluation.decision, eval_dict
 
     except Exception as e:
         # Policy evaluation failed - default to allow
-        return "allow", {"error": str(e)}
+        return "allow", {"error": str(e), "source": "local"}
+
+
+def evaluate_policy(session, tool_name: str, category: str, target: str, full_command: str = None):
+    """
+    Evaluate tool call against policy — server-first with local fallback.
+
+    1. If the Hardbound client is available, try the server.
+    2. If the server returns a decision, use it.
+    3. If the server is unreachable or returns None, fall back to local evaluation.
+
+    This keeps backward compatibility: local evaluation always works,
+    server-side is an enhancement.
+    """
+    # Try server-side evaluation first
+    if HARDBOUND_CLIENT_AVAILABLE:
+        try:
+            decision, eval_dict = server_evaluate_policy(
+                tool_name=tool_name,
+                category=category,
+                target=target,
+                session=session,
+                full_command=full_command,
+            )
+            if decision is not None:
+                # Server returned a decision — store the request_id for
+                # outcome reporting in post_tool_use
+                if eval_dict and eval_dict.get("request_id"):
+                    session["_pending_server_request_id"] = eval_dict["request_id"]
+                return decision, eval_dict
+        except Exception:
+            pass  # Fall through to local
+
+    # Fallback: local evaluation
+    return evaluate_policy_local(session, tool_name, category, target, full_command)
 
 WEB4_DIR = Path.home() / ".web4"
 SESSION_DIR = WEB4_DIR / "sessions"
