@@ -29,6 +29,15 @@ from typing import Dict, List, Optional, Any, Literal
 PolicyDecision = Literal["allow", "deny", "warn"]
 PresetName = Literal["permissive", "safety", "strict", "audit-only"]
 
+# Tool names that carry a shell command line. Claude Code calls it "Bash";
+# gemini-cli's run_shell_command maps to "Shell" through the lineage map.
+# Both hand the engine the same thing — a command string to be executed — so
+# every shell-shaped rule must match on the set, not on one member. Naming
+# the set here (rather than remapping "Shell" -> "Bash" upstream) keeps the
+# audit record saying which tool actually ran.
+# Mirrors hestia core/src/policy/presets.rs (dp-web4/hestia#107).
+SHELL_TOOLS = ["Bash", "Shell"]
+
 
 @dataclass
 class RateLimitSpec:
@@ -111,7 +120,7 @@ SAFETY_RULES = [
         decision="allow",
         reason="rm confined to whitelisted scratch dir (/tmp) - permitted",
         match=PolicyMatch(
-            tools=["Bash"],
+            tools=list(SHELL_TOOLS),
             command_patterns=[
                 r"^\s*rm\s+(-{1,2}[A-Za-z]+\s+)+/tmp/[^\s;&|`$()]+(\s+/tmp/[^\s;&|`$()]+)*\s*$",
             ],
@@ -126,7 +135,7 @@ SAFETY_RULES = [
         decision="deny",
         reason="Destructive command blocked by safety preset",
         match=PolicyMatch(
-            tools=["Bash"],
+            tools=list(SHELL_TOOLS),
             # Block: rm with ANY flags, mkfs.* (filesystem format)
             # Rationale: rm -f bypasses prompts, rm -r is recursive, all flags are risky for agents
             target_patterns=[r"rm\s+-", r"mkfs\."],
@@ -140,7 +149,7 @@ SAFETY_RULES = [
         decision="warn",
         reason="File deletion flagged - use with caution",
         match=PolicyMatch(
-            tools=["Bash"],
+            tools=list(SHELL_TOOLS),
             # Warn on plain rm (no flags) - less dangerous but still destructive
             # Matches "rm file" or "rm ./path" but not "rm -rf" (caught by deny rule above)
             target_patterns=[r"rm\s+[^-]"],
@@ -219,7 +228,7 @@ SAFETY_RULES = [
         decision="warn",
         reason="git push without PAT will fail on WSL. Use: grep GITHUB_PAT ../.env | cut -d= -f2 | xargs -I {} git push https://user:{}@github.com/...",
         match=PolicyMatch(
-            tools=["Bash"],
+            tools=list(SHELL_TOOLS),
             command_patterns=[r"git\s+push"],
             command_patterns_are_regex=True,
             command_must_not_contain=["GITHUB_PAT", "@github.com"],

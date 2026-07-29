@@ -56,6 +56,7 @@ try:
         resolve_preset,
         is_preset_name,
         RateLimiter,
+        SHELL_TOOLS,
     )
     GOVERNANCE_AVAILABLE = True
 except ImportError:
@@ -64,6 +65,11 @@ except ImportError:
     PolicyRegistry = None
     PolicyEntity = None
     RateLimiter = None
+    # Not None like the rest: the shell-tool set gates classification and
+    # target extraction, which run before any policy lookup. A None here
+    # would take the whole hook out with a NameError on the first Bash call
+    # instead of degrading to "no policy engine".
+    SHELL_TOOLS = ["Bash", "Shell"]
 
 # Session-level rate limiter (memory-only, resets on restart)
 _rate_limiter = None
@@ -471,7 +477,7 @@ def classify_action(tool_name):
     categories = {
         "file_read": ["Read", "Glob", "Grep"],
         "file_write": ["Write", "Edit", "NotebookEdit"],
-        "command": ["Bash"],
+        "command": list(SHELL_TOOLS),
         "network": ["WebFetch", "WebSearch"],
         "delegation": ["Task"],
         "state": ["TodoWrite"],
@@ -486,7 +492,7 @@ def extract_target(tool_name, tool_input):
     """Extract primary target from tool input."""
     if tool_name in ["Read", "Write", "Edit", "Glob"]:
         return tool_input.get("file_path", tool_input.get("path", ""))
-    elif tool_name == "Bash":
+    elif tool_name in SHELL_TOOLS:
         cmd = tool_input.get("command", "")
         # First word or first 50 chars
         return cmd.split()[0] if cmd.split() else cmd[:50]
@@ -608,10 +614,10 @@ def main():
     category = r6["request"]["category"]
     target = r6["request"]["target"]
     # For Bash tools, pass full command to enable command_patterns matching
-    full_command = tool_input.get("command") if tool_name == "Bash" else None
+    full_command = tool_input.get("command") if tool_name in SHELL_TOOLS else None
 
     # Git push divergence check (heuristic - will be model-augmented later)
-    if tool_name == "Bash" and full_command:
+    if tool_name in SHELL_TOOLS and full_command:
         should_block, divergence_reason = check_git_push_divergence(full_command)
         if should_block:
             r6["git_check"] = {
