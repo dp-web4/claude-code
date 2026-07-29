@@ -26,8 +26,8 @@ Two things shape these tests:
    can only be reached when the tool matched AND the act was classified AND the
    command line was passed through, under each name separately.
 
-See test_destructive_deny_is_vacuous for a larger, pre-existing hole this fix
-deliberately does NOT close.
+See test_destructive_deny_rm_limb_is_dead for a larger, pre-existing hole this
+fix deliberately does NOT close.
 """
 
 import importlib.util
@@ -102,12 +102,14 @@ def judge(entity, tool_name, command):
 
 
 # Spread across the arms of the safety preset: the whitelist allow, a plain
-# fallthrough, and the two rules that turn out to be unreachable (below).
+# fallthrough, the one destructive limb that actually fires, and the two that
+# turn out to be unreachable (below).
 LINEAGE_CASES = [
     "rm -rf /tmp/scratch",       # allow-rm-whitelisted-scratch
     "ls -la /home/user",         # no rule -> default
-    "rm -rf /home/user/data",    # deny-destructive-commands, were it reachable
-    "rm /home/user/notes.txt",   # warn-file-delete, were it reachable
+    "mkfs.ext4 /dev/sdb1",       # deny-destructive-commands, mkfs limb: LIVE
+    "rm -rf /home/user/data",    # deny-destructive-commands, rm limb: dead
+    "rm /home/user/notes.txt",   # warn-file-delete, dead
 ]
 
 
@@ -162,36 +164,121 @@ def test_shell_tools_classify_as_commands(tool_name):
 @pytest.mark.parametrize("tool_name", SHELL_TOOLS)
 @pytest.mark.xfail(
     strict=True,
-    reason="pre-existing: extract_target truncates to the program name, so "
-           "target_patterns can never match. Not a lineage defect — holds for "
-           "Bash too. See the docstring.",
+    reason="pre-existing: extract_target truncates to the first token, which "
+           "cannot contain whitespace, so the `rm\\s+-` limb can never match. "
+           "Not a lineage defect — holds for Bash too. NOTE: the sibling "
+           "`mkfs\\.` limb of the same rule DOES fire; see the docstring "
+           "before concluding this pin is stale.",
 )
-def test_destructive_deny_is_vacuous(safety, tool_name):
+def test_destructive_deny_rm_limb_is_dead(safety, tool_name):
     """A hole strictly larger than the one this PR closes, pinned as xfail.
 
-    `deny-destructive-commands` matches `target_patterns=[r"rm\\s+-"]` against
-    `target`. In hestia's Rust engine that field carries the WHOLE command
-    (presets.rs: "handler.rs hands the whole command in as target"). The mirror's
-    extract_target returns `cmd.split()[0]` — "rm" — which contains no
-    whitespace, so the pattern cannot match under ANY tool name. Same for
-    warn-file-delete. Only the whitelist rule is live, because it keys on
-    command_patterns, which do get the full line.
+    THE RULE IS NOT VACUOUS — one of its two limbs is. Read this before
+    "fixing" or removing the pin.
 
-    test_policy_entity.py::test_evaluate_deny_destructive passes because it
-    calls evaluate() with the full command as `target` directly. That is the
-    input the production path never produces.
+    A shell act's `target` is `cmd.split()[0]`, which is whitespace-free by
+    construction. So, over the whole preset:
 
-    Left open deliberately. The naive repair — hand extract_target's shell
-    branch the whole command — makes the rule live but WITHOUT Rust's
-    `target_patterns_scope: MatchScope::ExecutablePositions`, so it would deny
-    `grep "rm -rf" log` for saying the word. That false-positive class was
-    already paid for once on the Rust side (ten denies on one member,
-    2026-07-27); reintroducing it here to close a gap that only affects
-    fail-open members during a daemon outage is the wrong trade to make
-    silently. Closing it properly means porting policy::shell, which is a
-    decision about whether this mirror should exist, not a bug fix.
+        a target_pattern is LIVE iff some whitespace-free string matches it.
+
+    Applying that to the shell-scoped rules (verified empirically through the
+    real classify_action -> extract_target -> evaluate seam, both tool names):
+
+        rule                          pattern        verdict
+        deny-destructive-commands     'rm\\s+-'       DEAD  — needs whitespace
+        deny-destructive-commands     'mkfs\\.'       LIVE  — prefix of 'mkfs.ext4'
+        warn-file-delete              'rm\\s+[^-]'    DEAD  — needs whitespace
+        allow-rm-whitelisted-scratch  (none)         LIVE  — keys on command_patterns
+        warn-git-push-no-pat          (none)         LIVE  — keys on command_patterns
+
+    In hestia's Rust engine `target` carries the WHOLE command (presets.rs:
+    "handler.rs hands the whole command in as target"), scoped by
+    `target_patterns_scope: MatchScope::ExecutablePositions`. The rules were
+    lifted verbatim across that difference. test_policy_entity.py::
+    test_evaluate_deny_destructive passes because it calls evaluate() with the
+    full command as `target` directly — an input the production path never
+    produces.
+
+    The live limb is worth less than it looks, and in the same way: it matches
+    only when `mkfs.*` is the literal first token, so `sudo mkfs.ext4 /dev/sdb1`
+    — the only form in which mkfs actually runs — allows, as do `time`, `env`,
+    `nohup` and anything chained. See test_destructive_deny_mkfs_limb_is_first
+    _token_only. So the two failures are one defect seen from two sides:
+    `target` is neither the whole command nor the executable positions, it is
+    the first token, which is wrong in both directions at once.
+
+    Left open deliberately. The naive fix — hand extract_target's shell branch
+    the whole command — was measured rather than assumed, and it costs only
+    precision, never coverage:
+
+        case                        today (first token)  naive (whole command)
+        mkfs.ext4 /dev/sdb1         deny                 deny
+        sudo mkfs.ext4 /dev/sdb1    allow                deny      (gained)
+        rm -rf /home/user/data      allow                deny      (gained)
+        grep "mkfs.ext4" syslog     allow                deny      <-- FALSE POS
+        grep "rm -rf" syslog        allow                deny      <-- FALSE POS
+        rm -rf /tmp/scratch         allow-whitelist      allow-whitelist
+
+    So it fixes both limbs and breaks neither; what it reintroduces is
+    deny-the-mention, because it flips `mkfs\\.` and `rm\\s+-` from token-scoped
+    to match-anywhere with no `MatchScope::ExecutablePositions` equivalent.
+    That false-positive class was already paid for once on the Rust side (ten
+    denies on one member, 2026-07-27) — which is the whole reason the Rust rule
+    carries that scope and this one has nowhere to put it.
+
+    Worth noting for whoever does the port: the /tmp whitelist survives the
+    widening on priority, so the escape hatch is not collateral damage.
+
+    Closing this properly means porting policy::shell — a decision about
+    whether this mirror should exist, not a bug fix.
     """
     result = judge(safety, tool_name, "rm -rf /home/user/data")
+    assert result.decision == "deny"
+    assert result.rule_id == "deny-destructive-commands"
+
+
+@pytest.mark.parametrize("tool_name", SHELL_TOOLS)
+def test_destructive_deny_mkfs_limb_fires_unwrapped(safety, tool_name):
+    """The limb that IS live, pinned as the baseline for any repair.
+
+    Deliberately not an xfail: it passes today and must keep passing. It does
+    NOT guard against widening `target` to the whole command — that was
+    measured and leaves this case denying (see the table above). What it
+    catches is the opposite mistake: a repair that anchors or narrows the
+    pattern and drops the one true positive the mirror currently gets.
+    """
+    result = judge(safety, tool_name, "mkfs.ext4 /dev/sdb1")
+    assert result.decision == "deny"
+    assert result.rule_id == "deny-destructive-commands"
+
+
+# Every wrapper moves the real program out of cmd.split()[0]. `sudo` is the
+# one that matters — mkfs needs root, so this is the realistic invocation.
+WRAPPED_MKFS = [
+    "sudo mkfs.ext4 /dev/sdb1",
+    "time mkfs.ext4 /dev/sdb1",
+    "env LC_ALL=C mkfs.ext4 /dev/sdb1",
+    "nohup mkfs.ext4 /dev/sdb1",
+    "true && mkfs.ext4 /dev/sdb1",
+]
+
+
+@pytest.mark.parametrize("command", WRAPPED_MKFS)
+@pytest.mark.xfail(
+    strict=True,
+    reason="pre-existing: target is cmd.split()[0], so any wrapper word hides "
+           "the program from the only live destructive limb. Same root cause "
+           "as test_destructive_deny_rm_limb_is_dead.",
+)
+def test_destructive_deny_mkfs_limb_is_first_token_only(safety, command):
+    """The live limb's reach, measured rather than assumed.
+
+    `/sbin/mkfs.ext4 ...` still denies (the pattern is unanchored, so it
+    matches inside the path token). Anything that puts a DIFFERENT word first
+    does not. Pinned because "the rule fires" is the wrong summary to leave
+    behind for whoever decides the mirror's fate.
+    """
+    result = judge(safety, "Bash", command)
     assert result.decision == "deny"
     assert result.rule_id == "deny-destructive-commands"
 
