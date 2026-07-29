@@ -191,6 +191,12 @@ def test_destructive_deny_rm_limb_is_dead(safety, tool_name):
         allow-rm-whitelisted-scratch  (none)         LIVE  — keys on command_patterns
         warn-git-push-no-pat          (none)         LIVE  — keys on command_patterns
 
+    "LIVE" for `mkfs\\.` is the weakest of the three: the pattern needs the
+    LITERAL DOT, so the portable `mkfs -t ext4 /dev/sdb1` is dead with no
+    wrapper at all. That is a second and independent narrowing, and unlike the
+    first-token one it survives the repair below — see
+    test_destructive_deny_mkfs_limb_requires_literal_dot.
+
     In hestia's Rust engine `target` carries the WHOLE command (presets.rs:
     "handler.rs hands the whole command in as target"), scoped by
     `target_patterns_scope: MatchScope::ExecutablePositions`. The rules were
@@ -218,6 +224,14 @@ def test_destructive_deny_rm_limb_is_dead(safety, tool_name):
         grep "mkfs.ext4" syslog     allow                deny      <-- FALSE POS
         grep "rm -rf" syslog        allow                deny      <-- FALSE POS
         rm -rf /tmp/scratch         allow-whitelist      allow-whitelist
+        mkfs -t ext4 /dev/sdb1      allow                allow     <-- STILL DEAD
+        sudo mkfs -t ext4 /dev/sdb1 allow                allow     <-- STILL DEAD
+
+    The last two rows are the ones that tell the porter widening `target` is
+    not the whole job: the PATTERN is also wrong. `mkfs\\.` cannot match an
+    un-dotted invocation at any scope, so a real, unwrapped, root-level
+    destructive command stays uncovered on both sides of the repair.
+    (Cross-checked independently on two rigs, 2026-07-28.)
 
     So it fixes both limbs and breaks neither; what it reintroduces is
     deny-the-mention, because it flips `mkfs\\.` and `rm\\s+-` from token-scoped
@@ -277,6 +291,39 @@ def test_destructive_deny_mkfs_limb_is_first_token_only(safety, command):
     matches inside the path token). Anything that puts a DIFFERENT word first
     does not. Pinned because "the rule fires" is the wrong summary to leave
     behind for whoever decides the mirror's fate.
+    """
+    result = judge(safety, "Bash", command)
+    assert result.decision == "deny"
+    assert result.rule_id == "deny-destructive-commands"
+
+
+# The dot is load-bearing. `mkfs -t ext4 /dev/sdb1` is the portable form and
+# needs no wrapper to evade the rule — the first token IS the program, and it
+# still does not match `mkfs\.`.
+UNDOTTED_MKFS = [
+    "mkfs -t ext4 /dev/sdb1",
+    "sudo mkfs -t ext4 /dev/sdb1",
+]
+
+
+@pytest.mark.parametrize("command", UNDOTTED_MKFS)
+@pytest.mark.xfail(
+    strict=True,
+    reason="pre-existing and DISTINCT from the first-token hole: the pattern "
+           "'mkfs\\\\.' requires a literal dot, so the un-dotted invocation is "
+           "uncovered even when the program is the first token — and unlike "
+           "the wrapper cases, widening `target` does not fix it.",
+)
+def test_destructive_deny_mkfs_limb_requires_literal_dot(safety, command):
+    """The second, independent narrowing of the one live destructive limb.
+
+    Kept separate from test_destructive_deny_mkfs_limb_is_first_token_only on
+    purpose. That test's subject is `target` scoping and every one of its cases
+    flips to deny under the naive repair; these two do not flip, because their
+    cause is the pattern rather than the scope. Folding them into the same
+    parametrize would make that xfail's stated reason false for two of its
+    rows, and would hide the one result that constrains the port: fixing scope
+    alone still leaves a real destructive invocation allowed.
     """
     result = judge(safety, "Bash", command)
     assert result.decision == "deny"
